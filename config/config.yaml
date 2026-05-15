@@ -55,8 +55,6 @@ schedule:
 platforms:
   enabled: true                         # 是否启用热榜平台抓取
   sources:
- 
-  
     # === 综合新闻媒体类 ===
     #- id: "toutiao"
     #  name: "今日头条"
