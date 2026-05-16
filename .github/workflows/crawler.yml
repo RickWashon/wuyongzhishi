@@ -177,3 +177,89 @@ jobs:
           ls -lh index.html || true
           ls -lh output/index.html || true
           find . -maxdepth 5 -name "*.html" -type f -print -exec ls -lh {} \;
+      
+      # retrieve html history from r2 and deploy news to Cloudflare
+      - name: Restore HTML history from R2
+        if: success()
+        env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.S3_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.S3_SECRET_ACCESS_KEY }}
+          AWS_DEFAULT_REGION: auto
+          S3_ENDPOINT_URL: ${{ secrets.S3_ENDPOINT_URL }}
+          S3_BUCKET_NAME: ${{ secrets.S3_BUCKET_NAME }}
+        run: |
+          python -m pip install --upgrade pip
+          pip install awscli
+
+          rm -rf public
+          mkdir -p public
+
+          echo "Restore previous HTML history from R2..."
+          aws s3 sync "s3://$S3_BUCKET_NAME/html" public \
+            --endpoint-url "$S3_ENDPOINT_URL" || true
+
+          echo "Restored files:"
+          find public -maxdepth 5 -type f -print || true
+
+      - name: Merge current TrendRadar HTML
+        if: success()
+        run: |
+          echo "Current generated HTML files:"
+          find . -maxdepth 6 -name "*.html" -type f -print || true
+
+          mkdir -p public
+
+          if [ -d output/html ]; then
+            cp -r output/html/* public/
+          fi
+
+          if [ -f index.html ]; then
+            cp index.html public/index.html
+          elif [ -f output/index.html ]; then
+            cp output/index.html public/index.html
+          elif [ -f public/latest/current.html ]; then
+            cp public/latest/current.html public/index.html
+          else
+            echo "No index.html found"
+            find . -maxdepth 6 -name "*.html" -type f -print
+            exit 1
+          fi
+
+          echo "Final public files:"
+          find public -maxdepth 6 -type f -print | sort
+
+      - name: Save HTML history to R2
+        if: success()
+        env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.S3_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.S3_SECRET_ACCESS_KEY }}
+          AWS_DEFAULT_REGION: auto
+          S3_ENDPOINT_URL: ${{ secrets.S3_ENDPOINT_URL }}
+          S3_BUCKET_NAME: ${{ secrets.S3_BUCKET_NAME }}
+        run: |
+          aws s3 sync public "s3://$S3_BUCKET_NAME/html" \
+            --endpoint-url "$S3_ENDPOINT_URL" \
+            --content-type "text/html; charset=utf-8"
+
+      - name: Deploy to Cloudflare Worker
+        if: success()
+        uses: cloudflare/wrangler-action@v3
+        with:
+          apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          accountId: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          command: deploy --name ${{ secrets.CLOUDFLARE_WORKER_NAME }}
+
+      - name: Send Worker link to WeCom
+        if: success()
+        env:
+          WEWORK_WEBHOOK_URL: ${{ secrets.WEWORK_WEBHOOK_URL }}
+          REPORT_URL: ${{ secrets.REPORT_URL }}
+        run: |
+          curl "$WEWORK_WEBHOOK_URL" \
+            -H "Content-Type: application/json" \
+            -d "{
+              \"msgtype\": \"markdown\",
+              \"markdown\": {
+                \"content\": \"【TrendRadar 网页版报告】\\n\\n本期热点报告已更新。\\n\\n[点击查看完整报告]($REPORT_URL)\"
+              }
+            }"
