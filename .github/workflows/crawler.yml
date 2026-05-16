@@ -170,13 +170,13 @@ jobs:
         run: uv run python -m trendradar
 
       # check index.html file after crawler 
-      - name: Check generated files after crawler
-        if: always()
-        run: |
-          pwd
-          ls -lh index.html || true
-          ls -lh output/index.html || true
-          find . -maxdepth 5 -name "*.html" -type f -print -exec ls -lh {} \;
+      #- name: Check generated files after crawler
+      #  if: always()
+      #  run: |
+      #    pwd
+      #    ls -lh index.html || true
+      #    ls -lh output/index.html || true
+      #    find . -maxdepth 5 -name "*.html" -type f -print -exec ls -lh {} \;
       
       # retrieve html history from r2 and deploy news to Cloudflare
       - name: Restore HTML history from R2
@@ -228,6 +228,70 @@ jobs:
           echo "Final public files:"
           find public -maxdepth 6 -type f -print | sort
 
+      - name: Generate history index
+        if: success()
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          from datetime import datetime
+
+          public = Path("public")
+          rows = []
+
+          for date_dir in sorted(public.iterdir(), reverse=True):
+              if not date_dir.is_dir():
+                  continue
+
+              name = date_dir.name
+              if len(name) != 10 or name[4] != "-" or name[7] != "-":
+                  continue
+
+              for html_file in sorted(date_dir.glob("*.html"), reverse=True):
+                  rel = html_file.relative_to(public).as_posix()
+                  title = f"{name} {html_file.stem.replace('-', ':')}"
+                  rows.append((title, rel))
+
+          items = "\n".join(
+              f'<li><a href="/{rel}">{title}</a></li>'
+              for title, rel in rows
+          )
+
+          html = f"""<!doctype html>
+          <html lang="zh-CN">
+          <head>
+            <meta charset="utf-8">
+            <meta name="viewport" content="width=device-width, initial-scale=1">
+            <title>TrendRadar 历史报告</title>
+            <style>
+              body {{
+                font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+                max-width: 960px;
+                margin: 40px auto;
+                padding: 0 20px;
+                line-height: 1.6;
+              }}
+              h1 {{ font-size: 28px; }}
+              li {{ margin: 8px 0; }}
+              a {{ color: #2563eb; text-decoration: none; }}
+              a:hover {{ text-decoration: underline; }}
+            </style>
+          </head>
+          <body>
+            <h1>TrendRadar 历史报告</h1>
+            <p>更新时间：{datetime.now().strftime("%Y-%m-%d %H:%M:%S")}</p>
+            <p><a href="/#tab-0">返回最新报告</a></p>
+            <ul>
+              {items or "<li>暂无历史报告</li>"}
+            </ul>
+          </body>
+          </html>
+          """
+
+          (public / "history.html").write_text(html, encoding="utf-8")
+          print(f"Generated history.html with {len(rows)} reports")
+          PY
+
+
       - name: Save HTML history to R2
         if: success()
         env:
@@ -253,13 +317,93 @@ jobs:
         if: success()
         env:
           WEWORK_WEBHOOK_URL: ${{ secrets.WEWORK_WEBHOOK_URL }}
+          WEWORK_MSG_TYPE: ${{ secrets.WEWORK_MSG_TYPE }}
           REPORT_URL: ${{ secrets.REPORT_URL }}
         run: |
-          curl "$WEWORK_WEBHOOK_URL" \
-            -H "Content-Type: application/json" \
-            -d "{
-              \"msgtype\": \"markdown\",
-              \"markdown\": {
-                \"content\": \"【TrendRadar 网页版报告】\\n\\n本期热点报告已更新。\\n\\n[点击查看完整报告]($REPORT_URL)\"
+          python - <<'PY'
+          import json
+          import os
+          import re
+          import urllib.request
+          from pathlib import Path
+
+          webhook = os.environ.get("WEWORK_WEBHOOK_URL", "").strip()
+          msg_type = os.environ.get("WEWORK_MSG_TYPE", "markdown").strip().lower()
+          report_url_raw = os.environ.get("REPORT_URL", "").strip()
+
+          if not webhook:
+              print("WEWORK_WEBHOOK_URL is empty, skip WeCom notification")
+              raise SystemExit(0)
+
+          # 支持换行、逗号、分号分隔多个 URL
+          urls = [
+              item.strip()
+              for item in re.split(r"[\n,;]+", report_url_raw)
+              if item.strip()
+          ]
+
+          latest_url = urls[0] if len(urls) >= 1 else ""
+          history_url = urls[1] if len(urls) >= 2 else ""
+
+          # REPORT_URL 没填：跳过 CF Worker 链接推送，但不让 workflow 失败
+          if not latest_url:
+              print("REPORT_URL is empty, skip CF Worker link notification")
+              raise SystemExit(0)
+
+          history_exists = Path("public/history.html").exists()
+
+          content_lines = [
+              "【TrendRadar 网页版报告】",
+              "",
+              "本期热点报告已更新。",
+              "",
+              "查看最新新闻：",
+              latest_url,
+          ]
+
+          if history_url and history_exists:
+              content_lines.extend([
+                  "",
+                  "查看历史新闻：",
+                  history_url,
+              ])
+          else:
+              content_lines.extend([
+                  "",
+                  "历史新闻：暂无可用历史页，后续生成后会自动开放。",
+              ])
+
+          content = "\n".join(content_lines)
+
+          # markdown 模式也不使用 [文字](链接)，只发送裸链接，方便复制和个人微信查看
+          if msg_type == "text":
+              payload = {
+                  "msgtype": "text",
+                  "text": {
+                      "content": content
+                  }
               }
-            }"
+          else:
+              payload = {
+                  "msgtype": "markdown",
+                  "markdown": {
+                      "content": content
+                  }
+              }
+
+          req = urllib.request.Request(
+              webhook,
+              data=json.dumps(payload, ensure_ascii=False).encode("utf-8"),
+              headers={"Content-Type": "application/json"},
+              method="POST",
+          )
+
+          try:
+              with urllib.request.urlopen(req, timeout=20) as resp:
+                  print(resp.read().decode("utf-8", errors="ignore"))
+          except Exception as exc:
+              print(f"WeCom notification failed, but workflow will continue: {exc}")
+              raise SystemExit(0)
+          PY
+
+
