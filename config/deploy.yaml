@@ -1,0 +1,5 @@
+# this file modifies how to deploy html, which is isolated from trendradar config.yaml
+
+# how many day you want your html files kept in storage
+html:
+  retention_days: 30
