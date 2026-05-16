@@ -196,7 +196,7 @@ jobs:
 
           echo "Restore previous HTML history from R2..."
           aws s3 sync "s3://$S3_BUCKET_NAME/html" public \
-            --endpoint-url "$S3_ENDPOINT_URL" || true
+            --endpoint-url "$S3_ENDPOINT_URL"
 
           echo "Restored files:"
           find public -maxdepth 5 -type f -print || true
@@ -227,6 +227,62 @@ jobs:
 
           echo "Final public files:"
           find public -maxdepth 6 -type f -print | sort
+
+      - name: Cleanup old local HTML before deploy
+        if: success()
+        run: |
+          python - <<'PY'
+          import os
+          import re
+          import shutil
+          from pathlib import Path
+          from datetime import datetime, timedelta
+
+          def read_retention_days():
+              config_path = Path("config/deploy.yaml")
+              default_days = 30
+
+              if not config_path.exists():
+                  print("config/deploy.yaml not found, use default 30 days")
+                  return default_days
+
+              try:
+                  for line in config_path.read_text(encoding="utf-8").splitlines():
+                      line = line.strip()
+                      if line.startswith("retention_days:"):
+                          value = line.split(":", 1)[1].strip()
+                          return int(value)
+              except Exception as exc:
+                  print(f"Failed to read config/deploy.yaml, use default 30 days: {exc}")
+                  return default_days
+
+              print("html.retention_days not found, use default 30 days")
+              return default_days
+
+          retention_days = read_retention_days()
+          cutoff = datetime.now().date() - timedelta(days=retention_days)
+          date_pattern = re.compile(r"^\d{4}-\d{2}-\d{2}$")
+
+          if not os.path.isdir("public"):
+              raise SystemExit("public directory not found")
+
+          deleted = 0
+          for name in os.listdir("public"):
+              path = os.path.join("public", name)
+
+              # 只清理 public/2026-05-16 这种日期目录
+              # 不动 public/index.html、public/latest、public/history.html
+              if os.path.isdir(path) and date_pattern.match(name):
+                  folder_date = datetime.strptime(name, "%Y-%m-%d").date()
+                  if folder_date < cutoff:
+                      print(f"Deleting old html folder: {path}")
+                      shutil.rmtree(path)
+                      deleted += 1
+
+          print(f"HTML retention days: {retention_days}")
+          print(f"Deleted old html folders: {deleted}")
+          PY
+
 
       - name: Generate history index
         if: success()
@@ -301,9 +357,15 @@ jobs:
           S3_ENDPOINT_URL: ${{ secrets.S3_ENDPOINT_URL }}
           S3_BUCKET_NAME: ${{ secrets.S3_BUCKET_NAME }}
         run: |
+          test -f public/index.html
+
+          echo "Files to sync:"
+          find public -maxdepth 5 -type f -print | sort
+
           aws s3 sync public "s3://$S3_BUCKET_NAME/html" \
             --endpoint-url "$S3_ENDPOINT_URL" \
-            --content-type "text/html; charset=utf-8"
+            --content-type "text/html; charset=utf-8" \
+            --delete
 
       - name: Deploy to Cloudflare Worker
         if: success()
