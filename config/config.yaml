@@ -637,3 +637,14 @@ advanced:
     slack: 4000
   batch_send_interval: 3              # 批次发送间隔（秒）
   feishu_message_separator: "━━━━━━━━━━━━━━━━"
+
+
+#####################################
+# 12. 周报/月报 功能 
+# 使用ai分析功能
+#####################################
+periodic:
+  weekly_report: true        #  默认开启周报
+  monthly_report: false      #  默认关闭，太耗token
+  ai_analysis_level: simple   #  可选 simple/medium/deep 
+  
