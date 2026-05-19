@@ -11,7 +11,6 @@ from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any
 
-
 try:
     from zoneinfo import ZoneInfo
 except Exception:
@@ -56,10 +55,21 @@ AI_ANALYSIS_PROFILES = {
 }
 
 
+# 周期报告规则。
+#
+# latest_file:
+#   保留在 public/ 根目录下的「最新入口」，例如 /weekly.html。
+#   这样不会破坏 history.html 里的固定入口。
+#
+# archive_dir:
+#   保存所有历史周报/月报的归档目录，例如：
+#   public/periodic/weekly/2026-jan-week-01.html
+#   public/periodic/monthly/2026-jan.html
 PERIODIC_RULES = {
     "weekly": {
         "enabled_key": "weekly_report",
-        "output_file": "weekly.html",
+        "latest_file": "weekly.html",
+        "archive_dir": "periodic/weekly",
         "title": "TrendRadar 一周总结",
         "subtitle": "基于最近一周历史报告生成",
         "lookback_days": 7,
@@ -67,13 +77,21 @@ PERIODIC_RULES = {
     },
     "monthly": {
         "enabled_key": "monthly_report",
-        "output_file": "monthly.html",
+        "latest_file": "monthly.html",
+        "archive_dir": "periodic/monthly",
         "title": "TrendRadar 月度总结",
         "subtitle": "基于最近一个月历史报告生成",
         "lookback_days": 31,
         "min_days": 18,
     },
 }
+
+
+MONTH_ABBR = [
+    "",
+    "jan", "feb", "mar", "apr", "may", "jun",
+    "jul", "aug", "sep", "oct", "nov", "dec",
+]
 
 
 def get_periodic_now() -> datetime:
@@ -87,6 +105,89 @@ def get_periodic_now() -> datetime:
 
 def get_periodic_today() -> str:
     return get_periodic_now().strftime("%Y-%m-%d")
+
+
+def get_period_id(period: str, now: datetime | None = None) -> str:
+    """
+    返回周期报告的唯一周期 ID。
+
+    weekly 使用 ISO 周：
+      2026-W21
+
+    monthly 使用年月：
+      2026-05
+    """
+    if now is None:
+        now = get_periodic_now()
+
+    if period == "weekly":
+        iso_year, iso_week, _ = now.isocalendar()
+        return f"{iso_year}-W{iso_week:02d}"
+
+    if period == "monthly":
+        return now.strftime("%Y-%m")
+
+    return now.strftime("%Y-%m-%d")
+
+
+def get_month_week_index(now: datetime) -> int:
+    """
+    返回当月第几周，按自然日期粗分：
+    1-7 日为 week 01，8-14 日为 week 02，依次类推。
+
+    这样归档文件名会更直观：
+    2026-jan-week-01.html
+    """
+    return ((now.day - 1) // 7) + 1
+
+
+def get_period_archive_filename(period: str, now: datetime | None = None) -> str:
+    """
+    生成周期报告归档文件名。
+
+    weekly:
+      2026-jan-week-01.html
+
+    monthly:
+      2026-jan.html
+    """
+    if now is None:
+        now = get_periodic_now()
+
+    month = MONTH_ABBR[now.month]
+
+    if period == "weekly":
+        week_index = get_month_week_index(now)
+        return f"{now.year}-{month}-week-{week_index:02d}.html"
+
+    if period == "monthly":
+        return f"{now.year}-{month}.html"
+
+    return f"{now.strftime('%Y-%m-%d')}.html"
+
+
+def get_period_output_paths(period: str) -> tuple[Path, Path, Path]:
+    """
+    返回周期报告的三个输出位置：
+
+    archive_path:
+      带日期/周期名的归档文件，永久保留，方便后续回看和月报复用。
+
+    latest_path:
+      public/periodic/weekly/latest.html 或 public/periodic/monthly/latest.html。
+
+    root_latest_path:
+      public/weekly.html 或 public/monthly.html，作为固定入口，供 history.html 链接。
+    """
+    rule = PERIODIC_RULES[period]
+    archive_dir = PUBLIC_DIR / str(rule["archive_dir"])
+    archive_dir.mkdir(parents=True, exist_ok=True)
+
+    archive_path = archive_dir / get_period_archive_filename(period)
+    latest_path = archive_dir / "latest.html"
+    root_latest_path = PUBLIC_DIR / str(rule["latest_file"])
+
+    return archive_path, latest_path, root_latest_path
 
 
 def read_yaml_simple(path: Path) -> dict[str, Any]:
@@ -248,6 +349,16 @@ def should_generate_periodic_report(period: str, schedule_day: int | None) -> bo
     if period == "monthly":
         effective_day = get_effective_monthly_schedule_day(now, schedule_day)
         return now.day == effective_day
+
+    return False
+
+    now = get_periodic_now()
+
+    if period == "weekly":
+        return now.isoweekday() == schedule_day
+
+    if period == "monthly":
+        return now.day == schedule_day
 
     return False
 
@@ -730,26 +841,22 @@ def call_ai(prompt: str, level: str) -> str | None:
     return str(content).strip()
 
 
-def already_generated_today(period: str) -> bool:
-    rule = PERIODIC_RULES[period]
-    output_file = PUBLIC_DIR / str(rule["output_file"])
+def already_generated_current_period(period: str) -> bool:
+    """
+    检查当前周期的归档文件是否已经存在。
 
-    if not output_file.exists():
-        return False
+    workflow 前面会先从 R2 restore public/。
+    如果 R2 里已经有当前周期归档，例如：
+      public/periodic/weekly/2026-jan-week-01.html
+    本地也会存在，直接跳过 AI，避免同一周期重复花 token。
 
-    today = get_periodic_today()
+    注意：这里检查 archive_path，而不是 latest 入口。
+    latest 会被下一个周期覆盖，但 archive 会永久保留。
+    """
+    archive_path, _, _ = get_period_output_paths(period)
 
-    try:
-        html = output_file.read_text(encoding="utf-8", errors="ignore")
-    except Exception as exc:
-        print(f"Failed to read existing {output_file}, will regenerate if scheduled: {exc}")
-        return False
-
-    date_marker = f'<meta name="trendradar-periodic-generated-date" content="{today}">'
-    type_marker = f'<meta name="trendradar-periodic-type" content="{period}">'
-
-    if date_marker in html and type_marker in html:
-        print(f"{period} report already generated today ({today}), skip AI generation")
+    if archive_path.exists():
+        print(f"{period} report archive already exists: {archive_path}, skip AI generation")
         return True
 
     return False
@@ -811,6 +918,8 @@ def render_periodic_html(
     now = get_periodic_now()
     now_text = now.strftime("%Y-%m-%d %H:%M:%S")
     generated_date = now.strftime("%Y-%m-%d")
+    period_id = get_period_id(period, now)
+    archive_filename = get_period_archive_filename(period, now)
 
     return f"""<!doctype html>
 <html lang="zh-CN">
@@ -820,6 +929,8 @@ def render_periodic_html(
   <title>{html_escape.escape(title)}</title>
   <meta name="trendradar-periodic-type" content="{html_escape.escape(period)}">
   <meta name="trendradar-periodic-generated-date" content="{html_escape.escape(generated_date)}">
+  <meta name="trendradar-periodic-period-id" content="{html_escape.escape(period_id)}">
+  <meta name="trendradar-periodic-archive-file" content="{html_escape.escape(archive_filename)}">
   <style>
     * {{
       box-sizing: border-box;
@@ -1080,9 +1191,9 @@ def render_periodic_html(
 def generate_periodic_report(period: str, level: str) -> bool:
     rule = PERIODIC_RULES[period]
     min_days = int(rule["min_days"])
-    output_file = str(rule["output_file"])
 
-    if already_generated_today(period):
+    # 如果当前周期的归档文件已经从 R2 restore 回本地，就不再重复分析。
+    if already_generated_current_period(period):
         return False
 
     reports = filter_reports_by_period(period)
@@ -1108,10 +1219,20 @@ def generate_periodic_report(period: str, level: str) -> bool:
         return False
 
     html = render_periodic_html(period, level, ai_text, reports)
-    output_path = PUBLIC_DIR / output_file
-    output_path.write_text(html, encoding="utf-8")
 
-    print(f"Generated {output_file} from {day_count} days, {len(reports)} reports")
+    # 同时写入：
+    # 1. 周期归档文件：永久保留
+    # 2. periodic/.../latest.html：该类型报告的 latest 副本
+    # 3. /weekly.html 或 /monthly.html：固定入口，供 history.html 链接
+    archive_path, latest_path, root_latest_path = get_period_output_paths(period)
+    archive_path.write_text(html, encoding="utf-8")
+    latest_path.write_text(html, encoding="utf-8")
+    root_latest_path.write_text(html, encoding="utf-8")
+
+    print(
+        f"Generated {archive_path} and updated {latest_path}, {root_latest_path} "
+        f"from {day_count} days, {len(reports)} reports"
+    )
     return True
 
 
@@ -1139,10 +1260,13 @@ def generate_periodic_reports_if_enabled() -> None:
                 f"({now.isoweekday()}/{periodic['weekly_schedule_day']}), keep existing weekly.html"
             )
     else:
-        stale = PUBLIC_DIR / "weekly.html"
-        if stale.exists():
-            stale.unlink()
-            print("weekly_report disabled, removed stale public/weekly.html")
+        # 关闭周报时，只移除 latest 入口，保留 periodic/weekly/ 下的历史归档。
+        stale_root = PUBLIC_DIR / "weekly.html"
+        stale_latest = PUBLIC_DIR / "periodic/weekly/latest.html"
+        for stale in (stale_root, stale_latest):
+            if stale.exists():
+                stale.unlink()
+                print(f"weekly_report disabled, removed stale {stale}")
 
     if periodic["monthly_report"]:
         if should_generate_periodic_report("monthly", periodic["monthly_schedule_day"]):
@@ -1158,10 +1282,13 @@ def generate_periodic_reports_if_enabled() -> None:
                 "keep existing monthly.html"
             )
     else:
-        stale = PUBLIC_DIR / "monthly.html"
-        if stale.exists():
-            stale.unlink()
-            print("monthly_report disabled, removed stale public/monthly.html")
+        # 关闭月报时，只移除 latest 入口，保留 periodic/monthly/ 下的历史归档。
+        stale_root = PUBLIC_DIR / "monthly.html"
+        stale_latest = PUBLIC_DIR / "periodic/monthly/latest.html"
+        for stale in (stale_root, stale_latest):
+            if stale.exists():
+                stale.unlink()
+                print(f"monthly_report disabled, removed stale {stale}")
 
 
 def generate_history_index() -> None:
@@ -1675,7 +1802,8 @@ def prepare_pages() -> None:
     cleanup_old_local_html()
 
     # 先生成周期报告，再生成 history.html。
-    # 这样 history.html 可以根据 weekly.html / monthly.html 是否存在来显示入口。
+    # 这样 history.html 可以根据 /weekly.html、/monthly.html 是否存在来显示入口。
+    # 周报/月报会同时写入归档目录，例如 public/periodic/weekly/2026-jan-week-01.html。
     generate_periodic_reports_if_enabled()
     generate_history_index()
     add_history_button_to_index_page()
