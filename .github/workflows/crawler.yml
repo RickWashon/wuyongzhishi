@@ -269,6 +269,5 @@ jobs:
           REPORT_URL: ${{ secrets.REPORT_URL }}
         run: |
           uv run python scripts/deploy_pages.py notify
-          PY
 
 
