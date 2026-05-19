@@ -228,8 +228,13 @@ jobs:
           echo "Final public files:"
           find public -maxdepth 6 -type f -print | sort
 
+      # added weekly/monthly ai_analysis reports
       - name: Prepare Pages HTML
         if: success()
+        env:
+          AI_API_KEY: ${{ secrets.AI_API_KEY }}
+          AI_API_BASE: ${{ secrets.AI_API_BASE }}
+          AI_MODEL: ${{ secrets.AI_MODEL }}
         run: |
           uv run python scripts/deploy_pages.py prepare
 
