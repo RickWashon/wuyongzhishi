@@ -644,7 +644,9 @@ advanced:
 # 使用ai分析功能
 #####################################
 periodic:
-  weekly_report: true        #  默认开启周报
-  monthly_report: false      #  默认关闭，太耗token
+  #weekly_report: true        #  默认开启周报
+  weekly_report: 1            # 可设置为1-7，表示周一到周日，true默认为1，false则关闭 
+  monthly_report: false       #  默认关闭，太耗token。 可设置为1-31，表示每月xx号，true默认1号，false则关闭
   ai_analysis_level: simple   #  可选 simple/medium/deep 
+  
   
