@@ -4,7 +4,7 @@
   <img src="/_image/banner.webp" alt="TrendRadar Banner" width="80%">
 </a>
 
-最快<strong>30秒</strong>部署的热点助手 —— 告别无效刷屏，只看真正关心的新闻资讯
+最快<strong>30秒</strong>部署的热点助手 —— 告别无效刷屏，只��真正关心的新闻资讯
 
 </div>
 
@@ -16,6 +16,7 @@
 - **部署到 Cloudflare Pages**：工作流产物直接部署到 Pages，提供更稳定的访问与更灵活的自定义域名能力。
 - **历史页面（history.html）**：自动汇总历史报告入口，支持一键回看每日多次运行生成的 HTML 报告。
 - **周报 / 月报（weekly.html / monthly.html）**：基于最近一段时间的历史报告，调用 AI 生成周期总结，并自动归档。
+- **网页版报告链接推送到企微（企业微信）**：部署完成后，将“最新报告链接 + 历史页链接（若存在）”通过企业微信机器人推送，便于在群里直接打开网页查看。
 
 > 上述能力主要由新增脚本 `scripts/deploy_pages.py` 与修改后的工作流 `.github/workflows/crawler.yml` 提供。
 
@@ -25,7 +26,7 @@
 
 ### 1) 工作流整体流程（crawler.yml）
 
-在原有「抓取 + 生成报告」的基础上，我们额外做了四件事：
+在原有「抓取 + 生成报告」的基础上，我们额外做了几件事：
 
 1. **从 R2 恢复历史 HTML** 到 `public/`（用于保留历史报告、周报/月报归档）。
 2. **合并本次生成的 TrendRadar HTML** 到 `public/`（把最新产物覆盖/追加进历史目录）。
@@ -35,8 +36,9 @@
    - 生成周报/月报（若启用且到达计划日）
    - 给首页 `public/index.html` 注入“历史”按钮
 4. **把 `public/` 再次同步回 R2**，然后 **部署到 Cloudflare Pages**。
+5. **推送网页版报告链接到企业微信**：运行 `scripts/deploy_pages.py notify`，把链接发送到企微机器人。
 
-### 2) 需要的 Secrets（与 R2/Pages 相关）
+### 2) 需要的 Secrets（与 R2/Pages/企微相关）
 
 - R2（S3 兼容）
   - `S3_BUCKET_NAME`
@@ -49,6 +51,14 @@
   - `CLOUDFLARE_API_TOKEN`
   - `CLOUDFLARE_ACCOUNT_ID`
   - `CLOUDFLARE_PAGE_NAME`
+
+- 企业微信（可选，用于推送网页链接）
+  - `WEWORK_WEBHOOK_URL`
+  - `WEWORK_MSG_TYPE`（`markdown` 或 `text`）
+  - `REPORT_URL`
+    - 支持用换行 / 逗号 / 分号分隔多个 URL
+    - 第 1 个 URL 视为“最新报告”链接
+    - 第 2 个 URL（可选）视为“历史页面”链接（且需 `public/history.html` 存在才会发送）
 
 ---
 
