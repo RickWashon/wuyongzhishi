@@ -228,6 +228,12 @@ jobs:
           echo "Final public files:"
           find public -maxdepth 6 -type f -print | sort
 
+      # check deploy_pages.py grammar
+      - name: Check deploy pages script syntax
+        run: |
+          uv run python -m py_compile scripts/deploy_pages.py
+
+
       # added weekly/monthly ai_analysis reports
       - name: Prepare Pages HTML
         if: success()
