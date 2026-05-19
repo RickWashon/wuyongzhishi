@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 import argparse
+import calendar
 import html as html_escape
 import json
 import os
@@ -11,9 +12,17 @@ from pathlib import Path
 from typing import Any
 
 
+try:
+    from zoneinfo import ZoneInfo
+except Exception:
+    ZoneInfo = None
+
+
 PUBLIC_DIR = Path("public")
 CONFIG_PATH = Path("config/config.yaml")
 DEPLOY_CONFIG_PATH = Path("config/deploy.yaml")
+PERIODIC_TIMEZONE = os.environ.get("PERIODIC_TIMEZONE", "Asia/Shanghai")
+AI_INTERESTS_PATH = Path("config/ai_interests.txt")
 
 
 AI_ANALYSIS_PROFILES = {
@@ -67,17 +76,23 @@ PERIODIC_RULES = {
 }
 
 
+def get_periodic_now() -> datetime:
+    if ZoneInfo is not None:
+        try:
+            return datetime.now(ZoneInfo(PERIODIC_TIMEZONE))
+        except Exception:
+            pass
+    return datetime.now()
+
+
+def get_periodic_today() -> str:
+    return get_periodic_now().strftime("%Y-%m-%d")
+
+
 def read_yaml_simple(path: Path) -> dict[str, Any]:
     """
-    Lightweight YAML reader.
-
     Prefer PyYAML if available. If not, use a small fallback that supports
-    the config shape used here:
-
-    periodic:
-      weekly_report: true
-      monthly_report: false
-      ai_analysis_level: simple
+    the simple config shape used here.
     """
     if not path.exists():
         return {}
@@ -112,10 +127,9 @@ def read_yaml_simple(path: Path) -> dict[str, Any]:
         key = key.strip()
         value = value.strip()
 
-        parsed_value: Any
         lower = value.lower()
         if lower == "true":
-            parsed_value = True
+            parsed_value: Any = True
         elif lower == "false":
             parsed_value = False
         elif re.fullmatch(r"-?\d+", value):
@@ -156,6 +170,135 @@ def read_retention_days(default_days: int = 30) -> int:
     return default_days
 
 
+def parse_weekly_schedule(value: Any) -> int | None:
+    """
+    weekly_report:
+      false -> disabled
+      true  -> 1, Monday
+      1-7   -> Monday-Sunday
+    """
+    if value is False or value is None:
+        return None
+
+    if value is True:
+        return 1
+
+    try:
+        day = int(value)
+    except Exception:
+        print(f"Invalid periodic.weekly_report={value}, disable weekly report")
+        return None
+
+    if 1 <= day <= 7:
+        return day
+
+    print(f"Invalid periodic.weekly_report={value}, expected 1-7/true/false, disable weekly report")
+    return None
+
+
+def parse_monthly_schedule(value: Any) -> int | None:
+    """
+    monthly_report:
+      false -> disabled
+      true  -> 1
+      1-31  -> day of month
+    """
+    if value is False or value is None:
+        return None
+
+    if value is True:
+        return 1
+
+    try:
+        day = int(value)
+    except Exception:
+        print(f"Invalid periodic.monthly_report={value}, disable monthly report")
+        return None
+
+    if 1 <= day <= 31:
+        return day
+
+    print(f"Invalid periodic.monthly_report={value}, expected 1-31/true/false, disable monthly report")
+    return None
+
+
+def get_effective_monthly_schedule_day(now: datetime, schedule_day: int) -> int:
+    """
+    如果配置的月报日期超过当月最大日期，则使用当月最后一天。
+
+    例：
+    monthly_report: 31
+    - 1 月按 31 号生成
+    - 2 月按 28/29 号生成
+    - 4 月按 30 号生成
+    """
+    last_day = calendar.monthrange(now.year, now.month)[1]
+    return min(schedule_day, last_day)
+
+
+def should_generate_periodic_report(period: str, schedule_day: int | None) -> bool:
+    if schedule_day is None:
+        return False
+
+    now = get_periodic_now()
+
+    if period == "weekly":
+        return now.isoweekday() == schedule_day
+
+    if period == "monthly":
+        effective_day = get_effective_monthly_schedule_day(now, schedule_day)
+        return now.day == effective_day
+
+    return False
+
+
+def read_ai_config() -> dict[str, Any]:
+    data = read_yaml_simple(CONFIG_PATH)
+    ai_config = data.get("ai") or {}
+
+    if not isinstance(ai_config, dict):
+        ai_config = {}
+
+    model = os.environ.get("AI_MODEL", "").strip() or str(ai_config.get("model", "")).strip()
+    api_key = os.environ.get("AI_API_KEY", "").strip() or str(ai_config.get("api_key", "")).strip()
+    api_base = os.environ.get("AI_API_BASE", "").strip() or str(ai_config.get("api_base", "")).strip()
+
+    timeout = ai_config.get("timeout", 120)
+    temperature = ai_config.get("temperature", None)
+    max_tokens = ai_config.get("max_tokens", None)
+    num_retries = ai_config.get("num_retries", 1)
+    fallback_models = ai_config.get("fallback_models", [])
+
+    extra_params = ai_config.get("extra_params", {})
+    if not isinstance(extra_params, dict):
+        extra_params = {}
+
+    try:
+        timeout = int(timeout)
+    except Exception:
+        timeout = 120
+
+    try:
+        num_retries = int(num_retries)
+    except Exception:
+        num_retries = 1
+
+    if not isinstance(fallback_models, list):
+        fallback_models = []
+
+    return {
+        "model": model,
+        "api_key": api_key,
+        "api_base": api_base,
+        "timeout": timeout,
+        "temperature": temperature,
+        "max_tokens": max_tokens,
+        "num_retries": num_retries,
+        "fallback_models": fallback_models,
+        "extra_params": extra_params,
+    }
+
+
 def read_periodic_config() -> dict[str, Any]:
     data = read_yaml_simple(CONFIG_PATH)
     periodic = data.get("periodic") or {}
@@ -168,16 +311,24 @@ def read_periodic_config() -> dict[str, Any]:
         print(f"Unknown periodic.ai_analysis_level={level}, fallback to simple")
         level = "simple"
 
+    weekly_schedule = parse_weekly_schedule(periodic.get("weekly_report", 1))
+    monthly_schedule = parse_monthly_schedule(periodic.get("monthly_report", False))
+
     return {
-        "weekly_report": bool(periodic.get("weekly_report", True)),
-        "monthly_report": bool(periodic.get("monthly_report", False)),
+        "weekly_report": weekly_schedule is not None,
+        "monthly_report": monthly_schedule is not None,
+        "weekly_schedule_day": weekly_schedule,
+        "monthly_schedule_day": monthly_schedule,
         "ai_analysis_level": level,
     }
 
 
+
+
+
 def cleanup_old_local_html() -> None:
     retention_days = read_retention_days()
-    cutoff = datetime.now().date() - timedelta(days=retention_days)
+    cutoff = get_periodic_now().date() - timedelta(days=retention_days)
     date_pattern = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 
     if not PUBLIC_DIR.is_dir():
@@ -231,7 +382,7 @@ def collect_history_rows() -> list[tuple[str, str, str, str]]:
 
 def get_latest_report_per_day() -> list[Path]:
     """
-    For each date folder, use the latest html report.
+    For each date folder, use the latest HTML report.
     This avoids feeding many repeated same-day reports into weekly/monthly analysis.
     """
     reports: list[Path] = []
@@ -259,7 +410,7 @@ def get_latest_report_per_day() -> list[Path]:
 def filter_reports_by_period(period: str) -> list[Path]:
     rule = PERIODIC_RULES[period]
     lookback_days = int(rule["lookback_days"])
-    cutoff = datetime.now().date() - timedelta(days=lookback_days - 1)
+    cutoff = get_periodic_now().date() - timedelta(days=lookback_days - 1)
 
     reports = []
 
@@ -311,33 +462,31 @@ def extract_ai_blocks(html: str) -> list[tuple[str, str]]:
     return blocks
 
 
+def dedupe(items: list[str]) -> list[str]:
+    seen = set()
+    out = []
+
+    for item in items:
+        key = item.strip()
+        if not key or key in seen:
+            continue
+        seen.add(key)
+        out.append(key)
+
+    return out
+
+
 def summarize_report_for_ai(report_path: Path, profile: dict[str, Any]) -> str:
     raw = report_path.read_text(encoding="utf-8", errors="ignore")
 
     day = report_path.parent.name
     time_text = report_path.stem.replace("-", ":")
 
-    word_names = extract_class_texts(raw, "word-name")
-    standalone_names = extract_class_texts(raw, "standalone-name")
-    feed_names = extract_class_texts(raw, "feed-name")
+    word_names = dedupe(extract_class_texts(raw, "word-name"))
+    standalone_names = dedupe(extract_class_texts(raw, "standalone-name"))
+    feed_names = dedupe(extract_class_texts(raw, "feed-name"))
     news_titles = extract_class_texts(raw, "news-title")
     rss_titles = extract_class_texts(raw, "rss-title")
-
-    # 去重但保持顺序
-    def dedupe(items: list[str]) -> list[str]:
-        seen = set()
-        out = []
-        for item in items:
-            key = item.strip()
-            if not key or key in seen:
-                continue
-            seen.add(key)
-            out.append(key)
-        return out
-
-    word_names = dedupe(word_names)
-    standalone_names = dedupe(standalone_names)
-    feed_names = dedupe(feed_names)
     titles = dedupe(news_titles + rss_titles)
 
     max_titles = int(profile["max_titles_per_report"])
@@ -400,10 +549,33 @@ def build_periodic_source_text(period: str, level: str, reports: list[Path]) -> 
     return text
 
 
+def read_ai_interests() -> str:
+    if not AI_INTERESTS_PATH.exists():
+        print("config/ai_interests.txt not found, continue without interests scope")
+        return ""
+
+    try:
+        text = AI_INTERESTS_PATH.read_text(encoding="utf-8").strip()
+    except Exception as exc:
+        print(f"Failed to read config/ai_interests.txt: {exc}")
+        return ""
+
+    # 去掉纯注释和空行，减少 token
+    lines = []
+    for line in text.splitlines():
+        stripped = line.strip()
+        if not stripped or stripped.startswith("#"):
+            continue
+        lines.append(line)
+
+    return "\n".join(lines).strip()
+
+
 def build_periodic_prompt(period: str, level: str, source_text: str) -> str:
     profile = AI_ANALYSIS_PROFILES[level]
     rule = PERIODIC_RULES[period]
     title = str(rule["title"])
+    interests_text = read_ai_interests()
 
     if level == "simple":
         sections = """
@@ -436,14 +608,28 @@ def build_periodic_prompt(period: str, level: str, source_text: str) -> str:
 8. 研判策略建议：面向投资者、品牌方、普通读者分别给建议
 """
 
+    interests_block = ""
+    if interests_text:
+        interests_block = f"""
+用户关注领域限定，来自 config/ai_interests.txt：
+{interests_text}
+
+请优先围绕这些关注方向做周期总结。材料中与关注方向无关的娱乐、社会闲谈、低价值噪声可以弱化或忽略。
+但如果某个非关注方向事件具有明显跨领域影响，也可以作为弱信号简要提及。
+""".strip()
+
     return f"""
 你是 TrendRadar 的周期总结分析器。请基于以下历史热点报告材料，生成《{title}》。
 
 分析深度：{level}
 分析要求：{profile["style"]}
 
+{interests_block}
+
 要求：
 - 不要逐条复述新闻；
+- 不要简单按 HTML 中出现次数排序来决定重点；
+- 优先结合用户关注领域、TR 关键词/标签、跨日持续性和平台共振来判断重点；
 - 重点提炼趋势、变化、共振、分歧和弱信号；
 - 保持中文输出；
 - 标题清晰，适合直接渲染成 HTML；
@@ -460,21 +646,28 @@ def build_periodic_prompt(period: str, level: str, source_text: str) -> str:
 
 
 def call_ai(prompt: str, level: str) -> str | None:
-    api_key = os.environ.get("AI_API_KEY", "").strip()
-    api_base = os.environ.get("AI_API_BASE", "").strip().rstrip("/")
-    model = os.environ.get("AI_MODEL", "").strip()
-
-    if not api_key or not model:
-        print("AI_API_KEY or AI_MODEL is empty, skip periodic report")
+    try:
+        from litellm import completion
+    except Exception as exc:
+        print(f"litellm import failed, skip periodic report: {exc}")
         return None
 
-    if not api_base:
-        api_base = "https://api.openai.com/v1"
-
+    ai_config = read_ai_config()
     profile = AI_ANALYSIS_PROFILES[level]
 
-    url = f"{api_base}/chat/completions"
-    payload = {
+    model = ai_config["model"]
+    api_key = ai_config["api_key"]
+    api_base = ai_config["api_base"]
+    timeout = ai_config["timeout"]
+    num_retries = ai_config["num_retries"]
+    fallback_models = ai_config["fallback_models"]
+    extra_params = ai_config["extra_params"]
+
+    if not model:
+        print("AI model is empty, skip periodic report")
+        return None
+
+    kwargs: dict[str, Any] = {
         "model": model,
         "messages": [
             {
@@ -486,38 +679,85 @@ def call_ai(prompt: str, level: str) -> str | None:
                 "content": prompt,
             },
         ],
-        "temperature": profile["temperature"],
-        "max_tokens": profile["max_output_tokens"],
+        "timeout": timeout,
+        "num_retries": num_retries,
     }
 
-    req = urllib.request.Request(
-        url,
-        data=json.dumps(payload, ensure_ascii=False).encode("utf-8"),
-        headers={
-            "Content-Type": "application/json",
-            "Authorization": f"Bearer {api_key}",
-        },
-        method="POST",
-    )
+    # API key 允许从环境变量或 config.yaml 传入。
+    # 对于部分本地模型/网关，可能不需要 key；这里不强制报错。
+    if api_key:
+        kwargs["api_key"] = api_key
+
+    # LiteLLM 原生提供商如 deepseek/deepseek-chat 通常不需要 api_base。
+    # OpenAI 兼容中转/自建网关才需要 api_base。
+    if api_base:
+        kwargs["api_base"] = api_base
+
+    # 周期报告按 simple/medium/deep 控制输出长度。
+    max_tokens = int(profile["max_output_tokens"])
+    if max_tokens > 0:
+        kwargs["max_tokens"] = max_tokens
+
+    # 优先用周期报告档位里的 temperature。
+    # 如果你想完全跟随 config/config.yaml 的 ai.temperature，也可以改这里。
+    kwargs["temperature"] = profile["temperature"]
+
+    if fallback_models:
+        kwargs["fallbacks"] = fallback_models
+
+    if extra_params:
+        kwargs.update(extra_params)
 
     try:
-        with urllib.request.urlopen(req, timeout=90) as resp:
-            data = json.loads(resp.read().decode("utf-8", errors="ignore"))
+        response = completion(**kwargs)
     except Exception as exc:
-        print(f"Periodic AI request failed, skip: {exc}")
+        print(f"Periodic AI request failed via LiteLLM, skip: {exc}")
         return None
 
     try:
-        return data["choices"][0]["message"]["content"].strip()
-    except Exception as exc:
-        print(f"Failed to parse AI response, skip: {exc}")
+        content = response["choices"][0]["message"]["content"]
+    except Exception:
+        try:
+            content = response.choices[0].message.content
+        except Exception as exc:
+            print(f"Failed to parse LiteLLM response, skip: {exc}")
+            return None
+
+    if not content:
+        print("LiteLLM returned empty content, skip periodic report")
         return None
+
+    return str(content).strip()
+
+
+def already_generated_today(period: str) -> bool:
+    rule = PERIODIC_RULES[period]
+    output_file = PUBLIC_DIR / str(rule["output_file"])
+
+    if not output_file.exists():
+        return False
+
+    today = get_periodic_today()
+
+    try:
+        html = output_file.read_text(encoding="utf-8", errors="ignore")
+    except Exception as exc:
+        print(f"Failed to read existing {output_file}, will regenerate if scheduled: {exc}")
+        return False
+
+    date_marker = f'<meta name="trendradar-periodic-generated-date" content="{today}">'
+    type_marker = f'<meta name="trendradar-periodic-type" content="{period}">'
+
+    if date_marker in html and type_marker in html:
+        print(f"{period} report already generated today ({today}), skip AI generation")
+        return True
+
+    return False
 
 
 def text_to_html_content(text: str) -> str:
     escaped = html_escape.escape(text)
 
-    # Very small markdown-like rendering.
     escaped = re.sub(r"^### (.+)$", r"<h3>\1</h3>", escaped, flags=re.M)
     escaped = re.sub(r"^## (.+)$", r"<h2>\1</h2>", escaped, flags=re.M)
     escaped = re.sub(r"^# (.+)$", r"<h1>\1</h1>", escaped, flags=re.M)
@@ -568,7 +808,9 @@ def render_periodic_html(
     content_html = text_to_html_content(ai_text)
     day_count = len({path.parent.name for path in reports})
     report_count = len(reports)
-    now_text = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    now = get_periodic_now()
+    now_text = now.strftime("%Y-%m-%d %H:%M:%S")
+    generated_date = now.strftime("%Y-%m-%d")
 
     return f"""<!doctype html>
 <html lang="zh-CN">
@@ -576,6 +818,8 @@ def render_periodic_html(
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>{html_escape.escape(title)}</title>
+  <meta name="trendradar-periodic-type" content="{html_escape.escape(period)}">
+  <meta name="trendradar-periodic-generated-date" content="{html_escape.escape(generated_date)}">
   <style>
     * {{
       box-sizing: border-box;
@@ -838,6 +1082,9 @@ def generate_periodic_report(period: str, level: str) -> bool:
     min_days = int(rule["min_days"])
     output_file = str(rule["output_file"])
 
+    if already_generated_today(period):
+        return False
+
     reports = filter_reports_by_period(period)
     day_count = len({path.parent.name for path in reports})
 
@@ -846,10 +1093,6 @@ def generate_periodic_report(period: str, level: str) -> bool:
             f"{period} report enabled but not enough history days "
             f"({day_count}/{min_days}), skip"
         )
-        old_file = PUBLIC_DIR / output_file
-        if old_file.exists():
-            old_file.unlink()
-            print(f"Removed stale {old_file}")
         return False
 
     source_text = build_periodic_source_text(period, level, reports)
@@ -875,16 +1118,26 @@ def generate_periodic_report(period: str, level: str) -> bool:
 def generate_periodic_reports_if_enabled() -> None:
     periodic = read_periodic_config()
     level = periodic["ai_analysis_level"]
+    now = get_periodic_now()
 
     print(
         "Periodic config: "
         f"weekly_report={periodic['weekly_report']}, "
+        f"weekly_schedule_day={periodic['weekly_schedule_day']}, "
         f"monthly_report={periodic['monthly_report']}, "
-        f"ai_analysis_level={level}"
+        f"monthly_schedule_day={periodic['monthly_schedule_day']}, "
+        f"ai_analysis_level={level}, "
+        f"now={now.strftime('%Y-%m-%d %H:%M:%S %Z')}"
     )
 
     if periodic["weekly_report"]:
-        generate_periodic_report("weekly", level)
+        if should_generate_periodic_report("weekly", periodic["weekly_schedule_day"]):
+            generate_periodic_report("weekly", level)
+        else:
+            print(
+                "weekly_report enabled but today is not scheduled day "
+                f"({now.isoweekday()}/{periodic['weekly_schedule_day']}), keep existing weekly.html"
+            )
     else:
         stale = PUBLIC_DIR / "weekly.html"
         if stale.exists():
@@ -892,7 +1145,18 @@ def generate_periodic_reports_if_enabled() -> None:
             print("weekly_report disabled, removed stale public/weekly.html")
 
     if periodic["monthly_report"]:
-        generate_periodic_report("monthly", level)
+        if should_generate_periodic_report("monthly", periodic["monthly_schedule_day"]):
+            generate_periodic_report("monthly", level)
+        else:
+            effective_monthly_day = get_effective_monthly_schedule_day(
+                now,
+                periodic["monthly_schedule_day"],
+            )
+            print(
+                "monthly_report enabled but today is not scheduled day "
+                f"({now.day}/{effective_monthly_day}, configured={periodic['monthly_schedule_day']}), "
+                "keep existing monthly.html"
+            )
     else:
         stale = PUBLIC_DIR / "monthly.html"
         if stale.exists():
@@ -939,7 +1203,7 @@ def generate_history_index() -> None:
         </div>
         '''
 
-    now_text = datetime.now().strftime("%m-%d %H:%M")
+    now_text = get_periodic_now().strftime("%m-%d %H:%M")
 
     html = f"""<!doctype html>
 <html lang="zh-CN">
@@ -1340,7 +1604,6 @@ def send_report_link_to_wecom() -> None:
         print("WEWORK_WEBHOOK_URL is empty, skip WeCom notification")
         return
 
-    # 支持换行、逗号、分号分隔多个 URL
     urls = [
         item.strip()
         for item in re.split(r"[\n,;]+", report_url_raw)
