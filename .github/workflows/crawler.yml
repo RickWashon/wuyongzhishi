@@ -367,14 +367,24 @@ jobs:
             --content-type "text/html; charset=utf-8" \
             --delete
 
-      - name: Deploy to Cloudflare Worker
+      # do not use workers, it is not useful in cn network
+      #- name: Deploy to Cloudflare Worker
+      #  if: success()
+      #  uses: cloudflare/wrangler-action@v3
+      #  with:
+      #    apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+      #    accountId: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+      #    wranglerVersion: "4"
+      #    command: deploy --name ${{ secrets.CLOUDFLARE_WORKER_NAME }}
+
+      - name: Deploy to Cloudflare Pages
         if: success()
         uses: cloudflare/wrangler-action@v3
         with:
           apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           accountId: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
-          wranglerVersion: "4"
-          command: deploy --name ${{ secrets.CLOUDFLARE_WORKER_NAME }}
+          command: pages deploy public --project-name=${{ secrets.CLOUDFLARE_PAGE_NAME }} --branch=main
+
 
       - name: Send Worker link to WeCom
         if: success()
