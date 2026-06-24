@@ -7,7 +7,7 @@ on:
     # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
     #
     # 🔄 运行机制 / How it works:
-    #    - 每个周期为 7 天，届时自动停止  # changed to 30 days
+    #    - 每个周期为 7 天，届时自动停止  # changed to 180 days
     #    - 运行 "Check In" 会重置周期（重新开始 7 天倒计时，而非累加）
     #    - Each cycle is 7 days, then auto-stops
     #    - "Check In" resets the cycle (restarts 7-day countdown, not cumulative)
@@ -79,7 +79,7 @@ jobs:
             CURRENT_TIMESTAMP=$(date +%s)
             FIRST_RUN_TIMESTAMP=$(date -d "$FIRST_RUN_DATE" +%s)
             DIFF_SECONDS=$((CURRENT_TIMESTAMP - FIRST_RUN_TIMESTAMP))
-            LIMIT_SECONDS=2592000
+            LIMIT_SECONDS=15552000
 
             if [ $DIFF_SECONDS -gt $LIMIT_SECONDS ]; then
               echo "⚠️ 试用期已结束，请运行 'Check In' 签到续期"
