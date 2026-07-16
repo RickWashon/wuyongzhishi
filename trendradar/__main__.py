@@ -865,7 +865,7 @@ class NewsAnalyzer:
             report_type = mode_strategy["report_type"]
             ai_result = self._run_ai_analysis(
                 stats, rss_items, mode, report_type, id_to_name,
-                current_results=current_results, schedule=schedule,
+                current_results=data_source, schedule=schedule,
                 standalone_data=standalone_data,
             )
 
@@ -967,7 +967,8 @@ class NewsAnalyzer:
                 if ai_config.get("ENABLED", False):
                     ai_result = self._run_ai_analysis(
                         stats, rss_items, mode, report_type, id_to_name,
-                        current_results=current_results, schedule=schedule
+                        current_results=current_results, schedule=schedule,
+                        standalone_data=standalone_data
                     )
 
             # 准备报告数据
