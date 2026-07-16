@@ -70,6 +70,10 @@ PERIODIC_RULES = {
         "enabled_key": "weekly_report",
         "latest_file": "weekly.html",
         "archive_dir": "periodic/weekly",
+        "history_file": "weekly-history.html",
+        "history_title": "TrendRadar 周报归档",
+        "history_subtitle": "查看已生成的全部周报",
+        "item_label": "周报",
         "title": "TrendRadar 一周总结",
         "subtitle": "基于最近一周历史报告生成",
         "lookback_days": 7,
@@ -79,6 +83,10 @@ PERIODIC_RULES = {
         "enabled_key": "monthly_report",
         "latest_file": "monthly.html",
         "archive_dir": "periodic/monthly",
+        "history_file": "monthly-history.html",
+        "history_title": "TrendRadar 月报归档",
+        "history_subtitle": "查看已生成的全部月报",
+        "item_label": "月报",
         "title": "TrendRadar 月度总结",
         "subtitle": "基于最近一个月历史报告生成",
         "lookback_days": 31,
@@ -1291,6 +1299,158 @@ def generate_periodic_reports_if_enabled() -> None:
                 print(f"monthly_report disabled, removed stale {stale}")
 
 
+def parse_periodic_archive_label(period: str, path: Path) -> tuple[str, str]:
+    """Return a readable title and sort key for one periodic archive file."""
+    stem = path.stem
+
+    if period == "weekly":
+        match = re.fullmatch(r"(\d{4})-([a-z]{3})-week-(\d{2})", stem, re.I)
+        if match:
+            year, month_abbr, week_index = match.groups()
+            try:
+                month_number = MONTH_ABBR.index(month_abbr.lower())
+            except ValueError:
+                month_number = 0
+            if month_number:
+                title = f"{year} 年 {month_number} 月第 {int(week_index)} 周"
+                sort_key = f"{year}-{month_number:02d}-{int(week_index):02d}"
+                return title, sort_key
+
+    if period == "monthly":
+        match = re.fullmatch(r"(\d{4})-([a-z]{3})", stem, re.I)
+        if match:
+            year, month_abbr = match.groups()
+            try:
+                month_number = MONTH_ABBR.index(month_abbr.lower())
+            except ValueError:
+                month_number = 0
+            if month_number:
+                title = f"{year} 年 {month_number} 月"
+                sort_key = f"{year}-{month_number:02d}"
+                return title, sort_key
+
+    return stem.replace("-", " "), stem
+
+
+def collect_periodic_history_rows(period: str) -> list[tuple[str, str, str]]:
+    """Collect archived reports and exclude the mutable latest copy."""
+    rule = PERIODIC_RULES[period]
+    archive_dir = PUBLIC_DIR / str(rule["archive_dir"])
+    rows: list[tuple[str, str, str]] = []
+
+    if not archive_dir.exists():
+        return rows
+
+    for path in archive_dir.glob("*.html"):
+        if path.name == "latest.html":
+            continue
+        title, sort_key = parse_periodic_archive_label(period, path)
+        rel = path.relative_to(PUBLIC_DIR).as_posix()
+        rows.append((title, rel, sort_key))
+
+    rows.sort(key=lambda item: item[2], reverse=True)
+    return rows
+
+
+def generate_periodic_history_index(period: str) -> None:
+    """Generate a browsable archive page for weekly or monthly reports."""
+    rule = PERIODIC_RULES[period]
+    rows = collect_periodic_history_rows(period)
+    latest_file = str(rule["latest_file"])
+    history_file = str(rule["history_file"])
+    history_title = str(rule["history_title"])
+    history_subtitle = str(rule["history_subtitle"])
+    item_label = str(rule["item_label"])
+
+    cards = "\n".join(
+        f"""
+        <a class="history-card" href="/{html_escape.escape(rel)}">
+          <div class="history-main">
+            <div class="history-title">{html_escape.escape(title)}</div>
+            <div class="history-meta">TrendRadar {html_escape.escape(item_label)}归档</div>
+          </div>
+          <div class="history-date"><strong>查看</strong></div>
+        </a>
+        """
+        for title, rel, _ in rows
+    )
+
+    if not cards:
+        cards = f"""
+        <div class="empty-card">暂无{html_escape.escape(item_label)}归档</div>
+        """
+
+    now_text = get_periodic_now().strftime("%m-%d %H:%M")
+
+    html = f"""<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>{html_escape.escape(history_title)}</title>
+  <style>
+    * {{ box-sizing: border-box; }}
+    body {{ font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif; margin: 0; padding: 16px; background: #fafafa; color: #333; line-height: 1.5; }}
+    .container {{ max-width: 960px; margin: 0 auto; background: #fff; border-radius: 12px; overflow: hidden; box-shadow: 0 2px 16px rgba(0,0,0,.06); }}
+    .header {{ position: relative; overflow: hidden; padding: 36px 28px 32px; color: #fff; text-align: center; background: linear-gradient(135deg, #4f46e5 0%, #7c3aed 100%); }}
+    .header-watermark {{ position: absolute; top: 50%; left: 50%; transform: translate(-50%, -50%); font-size: clamp(42px, 8vw, 88px); font-weight: 900; letter-spacing: .05em; color: rgba(255,255,255,.14); pointer-events: none; z-index: 1; white-space: nowrap; }}
+    .header-actions {{ position: absolute; top: 16px; right: 16px; z-index: 2; display: flex; gap: 8px; }}
+    .header-btn {{ display: inline-flex; align-items: center; justify-content: center; min-height: 38px; padding: 10px 18px; border-radius: 6px; border: 1px solid rgba(255,255,255,.3); background: rgba(255,255,255,.2); color: #fff; font-size: 13px; font-weight: 600; text-decoration: none; backdrop-filter: blur(10px); transition: all .2s ease; }}
+    .header-btn:hover {{ background: rgba(255,255,255,.3); transform: translateY(-1px); }}
+    .header-title {{ position: relative; z-index: 2; margin: 0 0 12px; font-size: 26px; font-weight: 800; }}
+    .header-subtitle {{ position: relative; z-index: 2; margin: 0; font-size: 14px; opacity: .9; }}
+    .summary {{ display: grid; grid-template-columns: repeat(2,minmax(0,1fr)); gap: 16px; padding: 22px 28px; border-bottom: 1px solid #eef0f4; }}
+    .summary-item {{ padding: 14px 16px; border-radius: 10px; background: #f8fafc; }}
+    .summary-label {{ display: block; margin-bottom: 4px; color: #6b7280; font-size: 12px; }}
+    .summary-value {{ color: #111827; font-size: 18px; font-weight: 700; }}
+    .content {{ padding: 28px; }}
+    .history-list {{ display: grid; gap: 12px; }}
+    .history-card {{ display: flex; align-items: center; justify-content: space-between; gap: 16px; padding: 16px 18px; border: 1px solid #eef0f4; border-radius: 12px; color: inherit; text-decoration: none; background: #fff; transition: all .18s ease; }}
+    .history-card:hover {{ border-color: #c7d2fe; background: #f8faff; box-shadow: 0 8px 24px rgba(79,70,229,.08); transform: translateY(-1px); }}
+    .history-title {{ color: #1f2937; font-size: 15px; font-weight: 700; }}
+    .history-meta {{ margin-top: 4px; color: #6b7280; font-size: 12px; }}
+    .history-date {{ flex-shrink: 0; min-width: 76px; padding-left: 16px; border-left: 1px solid #eef0f4; text-align: right; }}
+    .history-date strong {{ color: #4f46e5; font-size: 15px; }}
+    .empty-card {{ padding: 24px; border-radius: 12px; background: #f8fafc; color: #6b7280; text-align: center; }}
+    .footer {{ padding: 18px 28px 24px; border-top: 1px solid #eef0f4; color: #6b7280; font-size: 13px; text-align: center; background: #f8f9fa; }}
+    .footer a {{ color: #4f46e5; text-decoration: none; font-weight: 600; }}
+    @media (max-width: 600px) {{
+      body {{ padding: 12px; }}
+      .header {{ padding: 28px 20px 24px; }}
+      .header-actions {{ position: static; justify-content: center; flex-wrap: wrap; margin-bottom: 16px; }}
+      .summary {{ grid-template-columns: 1fr; padding: 18px 20px; }}
+      .content {{ padding: 20px; }}
+      .history-card {{ align-items: flex-start; flex-direction: column; }}
+      .history-date {{ width: 100%; min-width: 0; padding: 10px 0 0; border-left: 0; border-top: 1px solid #eef0f4; text-align: left; }}
+    }}
+  </style>
+</head>
+<body>
+  <div class="container">
+    <div class="header">
+      <div class="header-watermark">TrendRadar</div>
+      <div class="header-actions">
+        <a class="header-btn" href="/history.html">返回历史</a>
+        <a class="header-btn" href="/{html_escape.escape(latest_file)}">最新{html_escape.escape(item_label)}</a>
+      </div>
+      <h1 class="header-title">{html_escape.escape(history_title)}</h1>
+      <p class="header-subtitle">{html_escape.escape(history_subtitle)}</p>
+    </div>
+    <div class="summary">
+      <div class="summary-item"><span class="summary-label">归档数量</span><span class="summary-value">{len(rows)} 份</span></div>
+      <div class="summary-item"><span class="summary-label">更新时间</span><span class="summary-value">{now_text}</span></div>
+    </div>
+    <div class="content"><div class="history-list">{cards}</div></div>
+    <div class="footer">由 <strong>TrendRadar</strong> 生成 · <a href="/history.html">返回历史报告</a></div>
+  </div>
+</body>
+</html>
+"""
+
+    (PUBLIC_DIR / history_file).write_text(html, encoding="utf-8")
+    print(f"Generated {history_file} with {len(rows)} {period} reports")
+
+
 def generate_history_index() -> None:
     PUBLIC_DIR.mkdir(parents=True, exist_ok=True)
     rows = collect_history_rows()
@@ -1301,9 +1461,9 @@ def generate_history_index() -> None:
 
     action_links = ['<a class="header-btn" href="/#tab-0">返回最新</a>']
     if periodic["weekly_report"] and weekly_exists:
-        action_links.append('<a class="header-btn" href="/weekly.html">一周总结</a>')
+        action_links.append('<a class="header-btn" href="/weekly-history.html">一周总结</a>')
     if periodic["monthly_report"] and monthly_exists:
-        action_links.append('<a class="header-btn" href="/monthly.html">月度总结</a>')
+        action_links.append('<a class="header-btn" href="/monthly-history.html">月度总结</a>')
 
     action_links_html = "\n          ".join(action_links)
 
@@ -1805,6 +1965,8 @@ def prepare_pages() -> None:
     # 这样 history.html 可以根据 /weekly.html、/monthly.html 是否存在来显示入口。
     # 周报/月报会同时写入归档目录，例如 public/periodic/weekly/2026-jan-week-01.html。
     generate_periodic_reports_if_enabled()
+    generate_periodic_history_index("weekly")
+    generate_periodic_history_index("monthly")
     generate_history_index()
     add_history_button_to_index_page()
 
@@ -1827,6 +1989,8 @@ def main() -> None:
     elif args.command == "periodic":
         generate_periodic_reports_if_enabled()
     elif args.command == "history":
+        generate_periodic_history_index("weekly")
+        generate_periodic_history_index("monthly")
         generate_history_index()
     elif args.command == "button":
         add_history_button_to_index_page()
