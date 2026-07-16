@@ -859,14 +859,14 @@ class NewsAnalyzer:
         # AI 分析（如果启用，用于 HTML 报告）
         ai_result = None
         ai_config = self.ctx.config.get("AI_ANALYSIS", {})
-        if ai_config.get("ENABLED", False) and stats:
+        if ai_config.get("ENABLED", False) and (     stats or rss_items or standalone_data ):
             # 获取模式策略来确定报告类型
             mode_strategy = self._get_mode_strategy()
             report_type = mode_strategy["report_type"]
             ai_result = self._run_ai_analysis(
                 stats, rss_items, mode, report_type, id_to_name,
-                current_results=data_source, schedule=schedule,
-                standalone_data=standalone_data
+                current_results=current_results, schedule=schedule,
+                standalone_data=standalone_data,
             )
 
         # 翻译 RSS 内容（如果启用）— 在 HTML 生成前执行，确保网页版也能展示翻译内容
